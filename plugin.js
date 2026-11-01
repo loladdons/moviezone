@@ -208,6 +208,7 @@ async function getDiscoverFilters() {
     {
       id: "type",
       title: "Tipo",
+      label: "Tipo",
       type: "select",
       options: [
         { id: "movies", label: "Películas" },
@@ -220,12 +221,16 @@ async function getDiscoverFilters() {
     {
       id: "genre",
       title: "Género",
+      label: "Género",
       type: "select",
-      options: FEATURED_GENRES.map(function (g) { return { id: String(g.id), label: g.name }; })
+      options: [{ id: "all", label: "Todos" }].concat(
+        FEATURED_GENRES.map(function (g) { return { id: String(g.id), label: g.name }; })
+      )
     },
     {
       id: "order",
       title: "Orden",
+      label: "Orden",
       type: "select",
       options: [
         { id: "latest", label: "Más recientes" },
@@ -238,32 +243,41 @@ async function getDiscoverFilters() {
 async function getDiscover(opts) {
   opts = opts || {};
   const page = parseInt(opts.page, 10) || 1;
+
+  // La UI envía { type, genre, order } desde _filterMap
   let type = opts.type || opts.filter || opts.filterId || "movies";
-  let genreId = null;
+  let genreRaw = opts.genre;
+  let orderRaw = opts.order;
 
-  if (opts.genre != null && opts.genre !== "") genreId = parseInt(opts.genre, 10);
-  else if (opts.filterId != null && /^\d+$/.test(String(opts.filterId))) {
-    genreId = parseInt(opts.filterId, 10);
-    type = "movies";
-  } else if (opts.filter != null && /^\d+$/.test(String(opts.filter))) {
-    genreId = parseInt(opts.filter, 10);
-    type = "movies";
+  // Compat: a veces el valor viene en español
+  const typeMap = {
+    "peliculas": "movies", "películas": "movies", "movie": "movies", "movies": "movies",
+    "series": "tvshows", "serie": "tvshows", "tv": "tvshows", "tvshows": "tvshows",
+    "novelas": "novels", "novels": "novels",
+    "anime": "animes", "animes": "animes",
+    "colecciones": "collections", "collections": "collections", "sagas": "collections"
+  };
+  const tKey = String(type).toLowerCase().trim();
+  type = typeMap[tKey] || tKey;
+
+  let path = "movies";
+  let postType = "movies";
+  if (type === "tvshows") { path = "tvshows"; postType = "tvshows"; }
+  else if (type === "novels") { path = "novels"; postType = "novels"; }
+  else if (type === "animes") { path = "animes"; postType = "animes"; }
+  else if (type === "collections") { path = "collections"; postType = "collections"; }
+  else { path = "movies"; postType = "movies"; type = "movies"; }
+
+  // Género SOLO aplica a películas (los term_id de LaMovie son de movies)
+  let filterObj = null;
+  if (postType === "movies" && genreRaw != null && genreRaw !== "" && genreRaw !== "all") {
+    const genreId = parseInt(genreRaw, 10);
+    if (!isNaN(genreId) && genreId > 0) {
+      filterObj = { genres: [genreId] };
+    }
   }
 
-  const t = String(type).toLowerCase();
-  let path = "movies", postType = "movies";
-  if (t === "tvshows" || t === "series" || t === "serie") { path = "tvshows"; postType = "tvshows"; }
-  else if (t === "novels" || t === "novelas") { path = "novels"; postType = "novels"; }
-  else if (t === "animes" || t === "anime") { path = "animes"; postType = "animes"; }
-  else if (t === "collections" || t === "colecciones") { path = "collections"; postType = "collections"; }
-  else if (t.indexOf("cat-") === 0 || t.indexOf("categoria-") === 0) {
-    const slug = t.replace("cat-", "").replace("categoria-", "");
-    const found = FEATURED_GENRES.filter(function (g) { return g.slug === slug; })[0];
-    if (found) { genreId = found.id; path = "movies"; postType = "movies"; }
-  }
-
-  const orderBy = (opts.order === "popular" || opts.order === "views") ? "views" : "ID";
-  const filterObj = (genreId && !isNaN(genreId)) ? { genres: [genreId] } : null;
+  const orderBy = (orderRaw === "popular" || orderRaw === "views") ? "views" : "ID";
   const result = await listing(path, page, orderBy, "desc", postType, 24, filterObj);
   return { items: result.items, hasMore: result.hasMore, page: page };
 }
@@ -295,34 +309,108 @@ function parseId(id) {
   return { postType: "movies", originalId: s };
 }
 
-/** Busca el post en listados recientes / búsqueda por título parcial del id */
+/** Busca un post por _id (search no acepta id numérico puro). */
 async function fetchPostById(postType, originalId) {
-  // 1) search por id suele fallar; intentamos igual
-  let data = await apiGet(
-    BASE_API + "/search?q=" + encodeURIComponent(originalId) +
-    "&postType=" + (postType === "episodes" ? "any" : postType) +
-    "&postsPerPage=10"
-  );
-  if (data && data.data && Array.isArray(data.data.posts)) {
-    for (let i = 0; i < data.data.posts.length; i++) {
-      if (String(data.data.posts[i]._id) === String(originalId)) return data.data.posts[i];
-    }
-  }
-
-  // 2) Barrer primeras páginas del listing del tipo
+  const target = String(originalId);
   const pathMap = {
     movies: "movies", tvshows: "tvshows", animes: "animes",
     novels: "novels", collections: "collections", wwe: "wwe"
   };
   const path = pathMap[postType] || "movies";
-  for (let page = 1; page <= 5; page++) {
+  const perPage = 50;
+
+  // 1) Búsqueda textual por si el runtime ya tiene título en cache no aplica; intentar igual
+  let data = await apiGet(
+    BASE_API + "/search?q=" + encodeURIComponent(originalId) +
+    "&postType=" + postType + "&postsPerPage=10"
+  );
+  if (data && data.data && Array.isArray(data.data.posts)) {
+    for (let i = 0; i < data.data.posts.length; i++) {
+      if (String(data.data.posts[i]._id) === target) return data.data.posts[i];
+    }
+  }
+
+  // 2) Últimos publicados (desc) — cubre estrenos recientes
+  for (let page = 1; page <= 3; page++) {
     const list = await apiGet(
       BASE_API + "/listing/" + path + "?page=" + page +
-      "&orderBy=ID&order=desc&postType=" + postType + "&postsPerPage=40"
+      "&orderBy=ID&order=desc&postType=" + postType + "&postsPerPage=" + perPage
     );
     if (!list || !list.data || !Array.isArray(list.data.posts)) break;
     for (let i = 0; i < list.data.posts.length; i++) {
-      if (String(list.data.posts[i]._id) === String(originalId)) return list.data.posts[i];
+      if (String(list.data.posts[i]._id) === target) return list.data.posts[i];
+    }
+  }
+
+  // 3) Búsqueda binaria por páginas con orderBy=ID asc
+  let first = await apiGet(
+    BASE_API + "/listing/" + path + "?page=1&orderBy=ID&order=asc&postType=" +
+    postType + "&postsPerPage=" + perPage
+  );
+  if (!first || !first.data || !Array.isArray(first.data.posts) || !first.data.posts.length) return null;
+
+  const pag = first.data.pagination || {};
+  let lo = 1;
+  let hi = pag.last_page || 1;
+  const want = parseInt(target, 10);
+
+  // Si está en página 1 asc
+  for (let i = 0; i < first.data.posts.length; i++) {
+    if (String(first.data.posts[i]._id) === target) return first.data.posts[i];
+  }
+
+  let guard = 0;
+  while (lo <= hi && guard < 18) {
+    guard++;
+    const mid = (lo + hi) >> 1;
+    const list = mid === 1 ? first : await apiGet(
+      BASE_API + "/listing/" + path + "?page=" + mid +
+      "&orderBy=ID&order=asc&postType=" + postType + "&postsPerPage=" + perPage
+    );
+    if (!list || !list.data || !Array.isArray(list.data.posts) || !list.data.posts.length) {
+      hi = mid - 1;
+      continue;
+    }
+    const posts = list.data.posts;
+    const firstId = parseInt(posts[0]._id, 10);
+    const lastId = parseInt(posts[posts.length - 1]._id, 10);
+
+    for (let i = 0; i < posts.length; i++) {
+      if (String(posts[i]._id) === target) return posts[i];
+    }
+
+    if (!isNaN(want)) {
+      if (want < firstId) hi = mid - 1;
+      else if (want > lastId) lo = mid + 1;
+      else {
+        // id dentro del rango de la página pero no encontrado (huecos)
+        // explorar vecinos
+        if (mid > 1) {
+          const left = await apiGet(
+            BASE_API + "/listing/" + path + "?page=" + (mid - 1) +
+            "&orderBy=ID&order=asc&postType=" + postType + "&postsPerPage=" + perPage
+          );
+          if (left && left.data && Array.isArray(left.data.posts)) {
+            for (let i = 0; i < left.data.posts.length; i++) {
+              if (String(left.data.posts[i]._id) === target) return left.data.posts[i];
+            }
+          }
+        }
+        if (mid < (pag.last_page || mid)) {
+          const right = await apiGet(
+            BASE_API + "/listing/" + path + "?page=" + (mid + 1) +
+            "&orderBy=ID&order=asc&postType=" + postType + "&postsPerPage=" + perPage
+          );
+          if (right && right.data && Array.isArray(right.data.posts)) {
+            for (let i = 0; i < right.data.posts.length; i++) {
+              if (String(right.data.posts[i]._id) === target) return right.data.posts[i];
+            }
+          }
+        }
+        break;
+      }
+    } else {
+      break;
     }
   }
   return null;
@@ -460,8 +548,19 @@ async function getMeta(id, opts) {
   if (parsed.postType === "movies" || parsed.postType === "movie") {
     const post = await fetchPostById("movies", parsed.originalId);
     if (post) return toItem(post);
-    // Importante: devolver null (no "Contenido") para que la UI conserve el item del listado
-    return null;
+    // Nunca devolver null: la UI muestra "No encontrado".
+    // Streams siguen funcionando con el originalId vía /player?postId=
+    return {
+      id: id,
+      title: "Película",
+      type: "movie",
+      overview: null,
+      extra: {
+        ref: "movies:" + parsed.originalId,
+        postType: "movies",
+        originalId: parsed.originalId
+      }
+    };
   }
 
   // ── EPISODIO suelto ──
@@ -521,8 +620,17 @@ async function getMeta(id, opts) {
     };
   }
 
-  // Fallback genérico: null para no pisar datos del listado
-  return null;
+  // Fallback: objeto mínimo (evita "No encontrado" en la UI)
+  return {
+    id: id,
+    title: parsed.postType === "movies" ? "Película" : "Contenido",
+    type: seriesTypes[parsed.postType] ? "series" : "movie",
+    extra: {
+      ref: parsed.postType + ":" + parsed.originalId,
+      postType: parsed.postType,
+      originalId: parsed.originalId
+    }
+  };
 }
 
 // ─── Streams ─────────────────────────────────────────────────────────────
