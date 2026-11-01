@@ -1,12 +1,6 @@
 /**
- * MovieZone – Plugin completo adaptado a tu ContentService / JsAddonRuntime
- * Fuente: LaMovie (lamovie.org)
- *
- * Métodos:
- *   getHome, getNews, getDiscoverFilters, getDiscover,
- *   search, getMeta, getStreams, getCatalogs, getCatalog, getAds
- *
- * Runtime: usa fetch global (puente Dart de tu js_runtime.dart)
+ * MovieZone – Plugin adaptado (FIX series/capitulos + meta)
+ * Runtime: fetch global de JsAddonRuntime
  */
 
 const BASE_API = "https://lamovie.org/wp-api/v1";
@@ -36,7 +30,17 @@ const GENRE_MAP = {
   3056: "Bélica", 674: "Western", 703: "Infantil"
 };
 
-// ─── HTTP (solo fetch global del runtime) ────────────────────────────────
+function decodeHtml(s) {
+  if (!s) return s;
+  return String(s)
+    .replace(/&#8217;/g, "'")
+    .replace(/&#8220;|&#8221;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
 
 async function apiGet(url, headers) {
   const h = Object.assign({
@@ -56,8 +60,6 @@ async function apiGet(url, headers) {
     return null;
   }
 }
-
-// ─── Conversores ─────────────────────────────────────────────────────────
 
 function absImg(path) {
   if (!path) return null;
@@ -88,11 +90,6 @@ function toItem(post) {
     if (post.images.backdrop) backdrop = absImg(post.images.backdrop);
     if (post.images.logo) logo = absImg(post.images.logo);
   }
-  if (!poster && Array.isArray(post.images) && post.images[0]) {
-    const im = post.images[0];
-    if (im.poster) poster = absImg(im.poster);
-    if (im.backdrop) backdrop = absImg(im.backdrop);
-  }
 
   let rating = null;
   if (post.rating != null) {
@@ -111,7 +108,7 @@ function toItem(post) {
     }
   }
 
-  const title = String(post.title || "Sin título").replace(/\s*\(\d{4}\)\s*$/, "").trim();
+  const title = decodeHtml(String(post.title || "Sin título").replace(/\s*\(\d{4}\)\s*$/, "").trim());
 
   return {
     id: id,
@@ -119,7 +116,7 @@ function toItem(post) {
     poster: poster,
     backdrop: backdrop,
     logo: logo,
-    overview: post.overview || null,
+    overview: post.overview ? decodeHtml(post.overview) : null,
     type: type,
     rating: rating,
     year: year,
@@ -134,8 +131,6 @@ function toItem(post) {
     }
   };
 }
-
-// ─── Listing helper ──────────────────────────────────────────────────────
 
 async function listing(path, page, orderBy, order, postType, perPage, filterObj) {
   let url = BASE_API + "/listing/" + path +
@@ -160,8 +155,6 @@ async function listing(path, page, orderBy, order, postType, perPage, filterObj)
   return { items: items, hasMore: !!hasMore, page: page || 1 };
 }
 
-// ─── getHome ─────────────────────────────────────────────────────────────
-
 async function getHome() {
   const genreJobs = FEATURED_GENRES.map(function (g) {
     return listing("movies", 1, "ID", "desc", "movies", 14, { genres: [g.id] });
@@ -177,71 +170,38 @@ async function getHome() {
     listing("collections", 1, "ID", "desc", "collections", 12)
   ].concat(genreJobs));
 
-  const upcoming = results[0];
-  const popular = results[1];
-  const latest = results[2];
-  const series = results[3];
-  const novels = results[4];
-  const animes = results[5];
-  const collections = results[6];
-  const genreResults = results.slice(7);
-
   const rows = [];
+  const pushRow = function (id, title, type, style, items) {
+    if (items && items.length) {
+      rows.push({ id: id, title: title, type: type, imageStyle: style, items: items });
+    }
+  };
 
-  if (upcoming.items.length) {
-    if (upcoming.items[0]) upcoming.items[0].backdrop = BRAND_BANNER;
-    rows.push({
-      id: "estrenos",
-      title: "Estrenos destacados",
-      type: "hero",
-      imageStyle: "backdrop",
-      items: upcoming.items.slice(0, 12)
-    });
+  if (results[0].items.length) {
+    if (results[0].items[0]) results[0].items[0].backdrop = BRAND_BANNER;
+    pushRow("estrenos", "Estrenos destacados", "hero", "backdrop", results[0].items.slice(0, 12));
   }
-  if (popular.items.length) {
-    rows.push({ id: "populares", title: "Películas populares", type: "row", imageStyle: "poster", items: popular.items });
-  }
-  if (latest.items.length) {
-    rows.push({ id: "ultimas", title: "Últimas películas", type: "row", imageStyle: "poster", items: latest.items });
-  }
-  if (series.items.length) {
-    rows.push({ id: "series", title: "Series", type: "row", imageStyle: "poster", items: series.items });
-  }
-  if (novels.items.length) {
-    rows.push({ id: "novelas", title: "Novelas", type: "row", imageStyle: "poster", items: novels.items });
-  }
-  if (animes.items.length) {
-    rows.push({ id: "animes", title: "Anime", type: "row", imageStyle: "poster", items: animes.items });
-  }
-  if (collections.items.length) {
-    rows.push({ id: "colecciones", title: "Sagas y Colecciones", type: "row", imageStyle: "poster", items: collections.items });
-  }
+  pushRow("populares", "Películas populares", "row", "poster", results[1].items);
+  pushRow("ultimas", "Últimas películas", "row", "poster", results[2].items);
+  pushRow("series", "Series", "row", "poster", results[3].items);
+  pushRow("novelas", "Novelas", "row", "poster", results[4].items);
+  pushRow("animes", "Anime", "row", "poster", results[5].items);
+  pushRow("colecciones", "Sagas y Colecciones", "row", "poster", results[6].items);
 
   for (let i = 0; i < FEATURED_GENRES.length; i++) {
     const g = FEATURED_GENRES[i];
-    const res = genreResults[i];
+    const res = results[7 + i];
     if (res && res.items && res.items.length) {
-      rows.push({
-        id: "cat-" + g.slug,
-        title: g.name,
-        type: "row",
-        imageStyle: "poster",
-        items: res.items
-      });
+      pushRow("cat-" + g.slug, g.name, "row", "poster", res.items);
     }
   }
-
   return rows;
 }
-
-// ─── getNews ─────────────────────────────────────────────────────────────
 
 async function getNews() {
   const res = await listing("movies", 1, "ID", "desc", "movies", 12);
   return res.items;
 }
-
-// ─── getDiscoverFilters ──────────────────────────────────────────────────
 
 async function getDiscoverFilters() {
   return [
@@ -261,9 +221,7 @@ async function getDiscoverFilters() {
       id: "genre",
       title: "Género",
       type: "select",
-      options: FEATURED_GENRES.map(function (g) {
-        return { id: String(g.id), label: g.name };
-      })
+      options: FEATURED_GENRES.map(function (g) { return { id: String(g.id), label: g.name }; })
     },
     {
       id: "order",
@@ -277,18 +235,14 @@ async function getDiscoverFilters() {
   ];
 }
 
-// ─── getDiscover ─────────────────────────────────────────────────────────
-
 async function getDiscover(opts) {
   opts = opts || {};
   const page = parseInt(opts.page, 10) || 1;
-
   let type = opts.type || opts.filter || opts.filterId || "movies";
   let genreId = null;
 
-  if (opts.genre != null && opts.genre !== "") {
-    genreId = parseInt(opts.genre, 10);
-  } else if (opts.filterId != null && /^\d+$/.test(String(opts.filterId))) {
+  if (opts.genre != null && opts.genre !== "") genreId = parseInt(opts.genre, 10);
+  else if (opts.filterId != null && /^\d+$/.test(String(opts.filterId))) {
     genreId = parseInt(opts.filterId, 10);
     type = "movies";
   } else if (opts.filter != null && /^\d+$/.test(String(opts.filter))) {
@@ -297,45 +251,26 @@ async function getDiscover(opts) {
   }
 
   const t = String(type).toLowerCase();
-  let path = "movies";
-  let postType = "movies";
-  if (t === "tvshows" || t === "series" || t === "serie") {
-    path = "tvshows"; postType = "tvshows";
-  } else if (t === "novels" || t === "novelas") {
-    path = "novels"; postType = "novels";
-  } else if (t === "animes" || t === "anime") {
-    path = "animes"; postType = "animes";
-  } else if (t === "collections" || t === "colecciones") {
-    path = "collections"; postType = "collections";
-  } else if (t.indexOf("cat-") === 0 || t.indexOf("categoria-") === 0) {
+  let path = "movies", postType = "movies";
+  if (t === "tvshows" || t === "series" || t === "serie") { path = "tvshows"; postType = "tvshows"; }
+  else if (t === "novels" || t === "novelas") { path = "novels"; postType = "novels"; }
+  else if (t === "animes" || t === "anime") { path = "animes"; postType = "animes"; }
+  else if (t === "collections" || t === "colecciones") { path = "collections"; postType = "collections"; }
+  else if (t.indexOf("cat-") === 0 || t.indexOf("categoria-") === 0) {
     const slug = t.replace("cat-", "").replace("categoria-", "");
     const found = FEATURED_GENRES.filter(function (g) { return g.slug === slug; })[0];
-    if (found) {
-      genreId = found.id;
-      path = "movies"; postType = "movies";
-    }
-  } else if (t.indexOf("genre:") === 0) {
-    genreId = parseInt(t.split(":")[1], 10);
-    path = "movies"; postType = "movies";
+    if (found) { genreId = found.id; path = "movies"; postType = "movies"; }
   }
 
   const orderBy = (opts.order === "popular" || opts.order === "views") ? "views" : "ID";
   const filterObj = (genreId && !isNaN(genreId)) ? { genres: [genreId] } : null;
-
   const result = await listing(path, page, orderBy, "desc", postType, 24, filterObj);
-  return {
-    items: result.items,
-    hasMore: result.hasMore,
-    page: page
-  };
+  return { items: result.items, hasMore: result.hasMore, page: page };
 }
-
-// ─── search ──────────────────────────────────────────────────────────────
 
 async function search(query) {
   if (!query || typeof query !== "string" || !query.trim()) return [];
   const q = encodeURIComponent(query.trim());
-
   const data = await apiGet(BASE_API + "/search?q=" + q + "&postType=any&postsPerPage=40");
   const items = [];
   if (data && data.data && Array.isArray(data.data.posts)) {
@@ -344,122 +279,133 @@ async function search(query) {
       if (it) items.push(it);
     }
   }
-
-  try {
-    const kitsu = await apiGet("https://kitsu.io/api/edge/anime?filter[text]=" + q + "&page[limit]=10");
-    if (kitsu && Array.isArray(kitsu.data)) {
-      for (let i = 0; i < kitsu.data.length; i++) {
-        const ka = kitsu.data[i];
-        const attr = ka.attributes || {};
-        const titles = attr.titles || {};
-        const title = titles.en || titles.en_jp || attr.canonicalTitle || "Anime";
-        if (items.some(function (x) { return x.title && x.title.toLowerCase() === title.toLowerCase(); })) continue;
-        let year = null;
-        if (attr.startDate) {
-          const y = parseInt(String(attr.startDate).slice(0, 4), 10);
-          if (!isNaN(y)) year = String(y);
-        }
-        let rating = null;
-        if (attr.averageRating) {
-          const r = parseFloat(attr.averageRating) / 10;
-          if (!isNaN(r)) rating = parseFloat(r.toFixed(1));
-        }
-        items.push({
-          id: "kitsu-" + ka.id,
-          title: title,
-          poster: (attr.posterImage && (attr.posterImage.small || attr.posterImage.original)) || null,
-          backdrop: (attr.coverImage && (attr.coverImage.small || attr.coverImage.original)) || null,
-          overview: attr.synopsis || null,
-          type: "series",
-          rating: rating,
-          year: year,
-          genres: ["Anime"],
-          extra: { ref: "kitsu:" + ka.id, postType: "kitsu", originalId: ka.id }
-        });
-      }
-    }
-  } catch (e) {}
-
   return items;
 }
 
-// ─── getMeta ─────────────────────────────────────────────────────────────
-
 function parseId(id) {
   const s = String(id || "");
+  if (s.indexOf("kitsu_ep:") === 0) {
+    const p = s.split(":");
+    return { postType: "kitsu_ep", originalId: p[1], episode: parseInt(p[2], 10) || 1 };
+  }
   if (s.indexOf("kitsu-") === 0) return { postType: "kitsu", originalId: s.slice(6) };
   if (s.indexOf("episode-") === 0) return { postType: "episodes", originalId: s.slice(8) };
-  if (s.indexOf("actor-") === 0) return { postType: "actor", originalId: s.slice(6) };
   const idx = s.indexOf("-");
   if (idx > 0) return { postType: s.slice(0, idx), originalId: s.slice(idx + 1) };
   return { postType: "movies", originalId: s };
 }
 
+/** Busca el post en listados recientes / búsqueda por título parcial del id */
 async function fetchPostById(postType, originalId) {
-  const data = await apiGet(
+  // 1) search por id suele fallar; intentamos igual
+  let data = await apiGet(
     BASE_API + "/search?q=" + encodeURIComponent(originalId) +
     "&postType=" + (postType === "episodes" ? "any" : postType) +
-    "&postsPerPage=8"
+    "&postsPerPage=10"
   );
   if (data && data.data && Array.isArray(data.data.posts)) {
     for (let i = 0; i < data.data.posts.length; i++) {
       if (String(data.data.posts[i]._id) === String(originalId)) return data.data.posts[i];
     }
-    if (data.data.posts.length) return data.data.posts[0];
+  }
+
+  // 2) Barrer primeras páginas del listing del tipo
+  const pathMap = {
+    movies: "movies", tvshows: "tvshows", animes: "animes",
+    novels: "novels", collections: "collections", wwe: "wwe"
+  };
+  const path = pathMap[postType] || "movies";
+  for (let page = 1; page <= 5; page++) {
+    const list = await apiGet(
+      BASE_API + "/listing/" + path + "?page=" + page +
+      "&orderBy=ID&order=desc&postType=" + postType + "&postsPerPage=40"
+    );
+    if (!list || !list.data || !Array.isArray(list.data.posts)) break;
+    for (let i = 0; i < list.data.posts.length; i++) {
+      if (String(list.data.posts[i]._id) === String(originalId)) return list.data.posts[i];
+    }
   }
   return null;
 }
 
-async function loadSeasonsAndEpisodes(showId) {
-  const seasons = [];
-  const maxSeasonsToTry = 15;
-  let foundAny = false;
+/**
+ * Carga TODAS las temporadas y episodios.
+ * Endpoint correcto (del plugin original Kino):
+ *   /single/episodes/list?_id=SERIES_ID&season=N&page=1&postsPerPage=100
+ */
+async function loadSeasonsAndEpisodes(seriesId) {
+  // Primera llamada para obtener lista de temporadas
+  const first = await apiGet(
+    BASE_API + "/single/episodes/list?_id=" + encodeURIComponent(seriesId) +
+    "&season=1&page=1&postsPerPage=100"
+  );
+  if (!first || !first.data) return [];
 
-  for (let sn = 1; sn <= maxSeasonsToTry; sn++) {
-    const data = await apiGet(
-      BASE_API + "/listing/episodes?postId=" + encodeURIComponent(showId) +
-      "&season=" + sn + "&postsPerPage=100&orderBy=episode_number&order=asc"
-    );
-    if (!data || !data.data || !Array.isArray(data.data.posts) || data.data.posts.length === 0) {
-      if (foundAny) break;
-      if (sn >= 3 && !foundAny) break;
-      continue;
-    }
-    foundAny = true;
-    const eps = [];
-    for (let i = 0; i < data.data.posts.length; i++) {
-      const ep = data.data.posts[i];
-      const num = ep.episode_number || (i + 1);
-      let still = null;
-      if (ep.still_path) {
-        still = String(ep.still_path).indexOf("http") === 0
-          ? ep.still_path
-          : "https://image.tmdb.org/t/p/w500" + ep.still_path;
+  let seasonNums = [];
+  if (Array.isArray(first.data.seasons) && first.data.seasons.length) {
+    seasonNums = first.data.seasons.map(Number).filter(function (n) { return !isNaN(n) && n > 0; });
+    seasonNums.sort(function (a, b) { return a - b; });
+  }
+  if (!seasonNums.length) seasonNums = [1];
+
+  const seasons = [];
+
+  for (let si = 0; si < seasonNums.length; si++) {
+    const sn = seasonNums[si];
+    let allEps = [];
+    let page = 1;
+    let lastPage = 1;
+
+    do {
+      const data = (sn === 1 && page === 1) ? first : await apiGet(
+        BASE_API + "/single/episodes/list?_id=" + encodeURIComponent(seriesId) +
+        "&season=" + sn + "&page=" + page + "&postsPerPage=100"
+      );
+      if (!data || !data.data || !Array.isArray(data.data.posts)) break;
+
+      for (let i = 0; i < data.data.posts.length; i++) {
+        const ep = data.data.posts[i];
+        const num = ep.episode_number || (allEps.length + 1);
+        let still = null;
+        if (ep.still_path) {
+          still = String(ep.still_path).indexOf("http") === 0
+            ? ep.still_path
+            : "https://image.tmdb.org/t/p/w500" + ep.still_path;
+        }
+        allEps.push({
+          number: num,
+          id: "episode-" + ep._id,
+          title: decodeHtml(ep.title || ("Episodio " + num)),
+          overview: ep.overview ? decodeHtml(ep.overview) : null,
+          still: still
+        });
       }
-      eps.push({
-        number: num,
-        id: "episode-" + ep._id,
-        title: ep.title || ("Episodio " + num),
-        overview: ep.overview || null,
-        still: still
-      });
-    }
+
+      const pag = data.data.pagination || {};
+      lastPage = pag.last_page || 1;
+      page++;
+    } while (page <= lastPage && page <= 20);
+
+    allEps.sort(function (a, b) { return a.number - b.number; });
     seasons.push({
       number: sn,
       name: "Temporada " + sn,
-      episodes: eps
+      episodes: allEps
     });
-
-    if (data.data.seasons && Array.isArray(data.data.seasons) && data.data.seasons.length) {
-      const nums = data.data.seasons.map(Number).filter(function (n) { return !isNaN(n); });
-      if (nums.length) {
-        const maxS = Math.max.apply(null, nums);
-        if (sn >= maxS) break;
-      }
-    }
   }
 
   return seasons;
+}
+
+function titleFromEpisode(epTitle) {
+  if (!epTitle) return null;
+  // "Grey's Anatomy: Temporada 1 Episodio 1" -> "Grey's Anatomy"
+  const t = decodeHtml(String(epTitle));
+  const m = t.match(/^(.*?)\s*[:\-–]\s*Temporada\s*\d+/i);
+  if (m) return m[1].trim();
+  const m2 = t.match(/^(.*?)\s+Temporada\s*\d+/i);
+  if (m2) return m2[1].trim();
+  return null;
 }
 
 async function getMeta(id, opts) {
@@ -467,21 +413,80 @@ async function getMeta(id, opts) {
   if (!id) return null;
 
   const parsed = parseId(id);
+  const seriesTypes = { tvshows: 1, animes: 1, novels: 1, wwe: 1, collections: 1 };
 
+  // ── SERIES: prioridad cargar capítulos ──
+  if (seriesTypes[parsed.postType]) {
+    const seasons = await loadSeasonsAndEpisodes(parsed.originalId);
+    const post = await fetchPostById(parsed.postType, parsed.originalId);
+
+    if (post) {
+      const item = toItem(post);
+      if (item) {
+        item.seasons = seasons;
+        item.type = "series";
+        return item;
+      }
+    }
+
+    // Sin post completo: armar meta mínima CON capítulos (clave para la UI)
+    let title = "Serie";
+    let overview = null;
+    let still = null;
+    if (seasons.length && seasons[0].episodes && seasons[0].episodes.length) {
+      const ep0 = seasons[0].episodes[0];
+      title = titleFromEpisode(ep0.title) || title;
+      overview = ep0.overview || null;
+      still = ep0.still || null;
+    }
+
+    return {
+      id: id,
+      title: title,
+      poster: still,
+      backdrop: still,
+      overview: overview,
+      type: "series",
+      seasons: seasons,
+      extra: {
+        ref: parsed.postType + ":" + parsed.originalId,
+        postType: parsed.postType,
+        originalId: parsed.originalId
+      }
+    };
+  }
+
+  // ── MOVIES ──
+  if (parsed.postType === "movies" || parsed.postType === "movie") {
+    const post = await fetchPostById("movies", parsed.originalId);
+    if (post) return toItem(post);
+    // Importante: devolver null (no "Contenido") para que la UI conserve el item del listado
+    return null;
+  }
+
+  // ── EPISODIO suelto ──
+  if (parsed.postType === "episodes") {
+    return {
+      id: id,
+      title: "Episodio",
+      type: "movie",
+      extra: { ref: "episode:" + parsed.originalId, postType: "episodes", originalId: parsed.originalId }
+    };
+  }
+
+  // ── Kitsu ──
   if (parsed.postType === "kitsu") {
     const animeRes = await apiGet("https://kitsu.io/api/edge/anime/" + encodeURIComponent(parsed.originalId));
     if (!animeRes || !animeRes.data) return null;
     const attr = animeRes.data.attributes || {};
     const titles = attr.titles || {};
     const title = titles.en || titles.en_jp || attr.canonicalTitle || "Anime";
-    const totalEps = Math.min(attr.episodeCount || 24, 100);
+    const totalEps = Math.min(attr.episodeCount || 24, 80);
     const offsets = [];
     for (let o = 0; o < totalEps; o += 20) offsets.push(o);
     const batches = await Promise.all(offsets.map(function (o) {
-      return apiGet(
-        "https://kitsu.io/api/edge/anime/" + encodeURIComponent(parsed.originalId) +
-        "/episodes?page[limit]=20&page[offset]=" + o
-      );
+      return apiGet("https://kitsu.io/api/edge/anime/" + encodeURIComponent(parsed.originalId) +
+        "/episodes?page[limit]=20&page[offset]=" + o);
     }));
     const eps = [];
     for (let b = 0; b < batches.length; b++) {
@@ -516,37 +521,18 @@ async function getMeta(id, opts) {
     };
   }
 
-  const post = await fetchPostById(parsed.postType, parsed.originalId);
-  if (!post) {
-    return {
-      id: id,
-      title: "Contenido",
-      type: (parsed.postType === "tvshows" || parsed.postType === "animes" || parsed.postType === "novels") ? "series" : "movie",
-      extra: { ref: parsed.postType + ":" + parsed.originalId, postType: parsed.postType, originalId: parsed.originalId }
-    };
-  }
-
-  const item = toItem(post);
-  if (!item) return null;
-
-  if (item.type === "series" && parsed.postType !== "collections") {
-    item.seasons = await loadSeasonsAndEpisodes(parsed.originalId);
-  }
-
-  return item;
+  // Fallback genérico: null para no pisar datos del listado
+  return null;
 }
 
-// ─── getStreams ──────────────────────────────────────────────────────────
+// ─── Streams ─────────────────────────────────────────────────────────────
 
 function unpackDeanEdwards(html) {
   const m = String(html).match(/eval\(function\(p,a,c,k,e,d\)[\s\S]+?\.split\('\|'\)\)\)/);
   if (!m) return null;
   try {
-    const fnBody = m[0].replace(/^eval/, "return ");
-    return (new Function(fnBody))();
-  } catch (e) {
-    return null;
-  }
+    return (new Function(m[0].replace(/^eval/, "return ")))();
+  } catch (e) { return null; }
 }
 
 function extractSubtitles(code) {
@@ -565,26 +551,19 @@ function extractSubtitles(code) {
 async function resolveEmbeds(embeds) {
   if (!Array.isArray(embeds) || !embeds.length) return [];
   const streams = [];
-
   const sorted = embeds.slice().sort(function (a, b) {
-    const av = (a.url || "").indexOf("vimeos") >= 0 ? 1 : 0;
-    const bv = (b.url || "").indexOf("vimeos") >= 0 ? 1 : 0;
-    return bv - av;
+    return ((b.url || "").indexOf("vimeos") >= 0 ? 1 : 0) - ((a.url || "").indexOf("vimeos") >= 0 ? 1 : 0);
   });
 
   for (let i = 0; i < sorted.length; i++) {
     const embed = sorted[i];
     if (!embed || !embed.url) continue;
     if (String(embed.url).indexOf("embed.html?v=1") >= 0) continue;
-
     let target = embed.url;
 
     if (target.indexOf("videoapp.zip") >= 0) {
       try {
-        const html = await apiGet(target, {
-          "Referer": "https://lamovie.org/",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        });
+        const html = await apiGet(target, { "Referer": "https://lamovie.org/" });
         if (typeof html === "string") {
           const m = html.match(/<iframe[^>]+src=["'](https?:\/\/[^"']+)["']/i);
           if (m && m[1]) target = m[1];
@@ -594,10 +573,7 @@ async function resolveEmbeds(embeds) {
 
     if (target.indexOf("vimeos.net") >= 0 || target.indexOf("vimeos.zip") >= 0) {
       try {
-        const embedHtml = await apiGet(target, {
-          "Referer": "https://lamovie.org/",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        });
+        const embedHtml = await apiGet(target, { "Referer": "https://lamovie.org/" });
         if (typeof embedHtml !== "string") continue;
         const unpacked = unpackDeanEdwards(embedHtml);
         if (!unpacked) continue;
@@ -649,60 +625,46 @@ async function getPlayerEmbeds(postId) {
 
 async function getStreams(id, type, season, episode) {
   if (!id) return [];
-
-  if (String(id).indexOf("kitsu_ep:") === 0) {
-    const parts = String(id).split(":");
-    const kitsuId = parts[1];
-    const epNum = parseInt(parts[2], 10) || 1;
-    const animeRes = await apiGet("https://kitsu.io/api/edge/anime/" + encodeURIComponent(kitsuId));
-    if (!animeRes || !animeRes.data) return [];
-    const attr = animeRes.data.attributes || {};
-    const titles = attr.titles || {};
-    const candidates = [attr.canonicalTitle, titles.en, titles.en_jp].filter(Boolean);
-    for (let c = 0; c < candidates.length; c++) {
-      const sRes = await apiGet(BASE_API + "/search?q=" + encodeURIComponent(candidates[c]) + "&postType=animes&postsPerPage=5");
-      if (sRes && sRes.data && Array.isArray(sRes.data.posts) && sRes.data.posts.length) {
-        const post = sRes.data.posts[0];
-        const epData = await apiGet(
-          BASE_API + "/listing/episodes?postId=" + post._id + "&season=1&episode=" + epNum + "&postsPerPage=3"
-        );
-        if (epData && epData.data && Array.isArray(epData.data.posts) && epData.data.posts[0]) {
-          const embeds = await getPlayerEmbeds(epData.data.posts[0]._id);
-          const streams = await resolveEmbeds(embeds);
-          if (streams.length) return streams;
-        }
-        const embeds = await getPlayerEmbeds(post._id);
-        const streams = await resolveEmbeds(embeds);
-        if (streams.length) return streams;
-      }
-    }
-    return [];
-  }
-
   const parsed = parseId(id);
   let postId = parsed.originalId;
 
-  const isSeriesType = parsed.postType === "tvshows" || parsed.postType === "animes" ||
+  // Serie + season/episode → resolver id del episodio real
+  const isSeries = parsed.postType === "tvshows" || parsed.postType === "animes" ||
     parsed.postType === "novels" || type === "series" || type === "tv";
 
-  if (isSeriesType && (season != null || episode != null) && parsed.postType !== "episodes") {
+  if (isSeries && (season != null || episode != null) && parsed.postType !== "episodes") {
     const s = season || 1;
     const e = episode || 1;
-    const epData = await apiGet(
-      BASE_API + "/listing/episodes?postId=" + encodeURIComponent(postId) +
-      "&season=" + s + "&episode=" + e + "&postsPerPage=8"
+    const data = await apiGet(
+      BASE_API + "/single/episodes/list?_id=" + encodeURIComponent(postId) +
+      "&season=" + s + "&page=1&postsPerPage=100"
     );
-    if (epData && epData.data && Array.isArray(epData.data.posts) && epData.data.posts.length) {
-      let epPost = null;
-      for (let i = 0; i < epData.data.posts.length; i++) {
-        const p = epData.data.posts[i];
-        if (Number(p.episode_number) === Number(e)) {
-          epPost = p;
+    if (data && data.data && Array.isArray(data.data.posts)) {
+      let found = null;
+      for (let i = 0; i < data.data.posts.length; i++) {
+        if (Number(data.data.posts[i].episode_number) === Number(e)) {
+          found = data.data.posts[i];
           break;
         }
       }
-      if (!epPost) epPost = epData.data.posts[0];
-      postId = epPost._id;
+      // paginar si no está en página 1
+      if (!found && data.data.pagination && data.data.pagination.last_page > 1) {
+        for (let p = 2; p <= Math.min(data.data.pagination.last_page, 10) && !found; p++) {
+          const d2 = await apiGet(
+            BASE_API + "/single/episodes/list?_id=" + encodeURIComponent(postId) +
+            "&season=" + s + "&page=" + p + "&postsPerPage=100"
+          );
+          if (d2 && d2.data && Array.isArray(d2.data.posts)) {
+            for (let i = 0; i < d2.data.posts.length; i++) {
+              if (Number(d2.data.posts[i].episode_number) === Number(e)) {
+                found = d2.data.posts[i];
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (found) postId = found._id;
     }
   }
 
@@ -714,8 +676,6 @@ async function getStreams(id, type, season, episode) {
   if (!embeds.length) return [];
   return await resolveEmbeds(embeds);
 }
-
-// ─── Catálogos ───────────────────────────────────────────────────────────
 
 async function getCatalogs() {
   return [
@@ -734,7 +694,6 @@ async function getCatalog(catalogId, opts) {
   opts = opts || {};
   const page = parseInt(opts.page, 10) || 1;
   const id = String(catalogId || "");
-
   if (id === "movies-latest") return listing("movies", page, "ID", "desc", "movies", 24);
   if (id === "movies-popular") return listing("movies", page, "views", "desc", "movies", 24);
   if (id === "series-latest") return listing("tvshows", page, "ID", "desc", "tvshows", 24);
@@ -748,11 +707,7 @@ async function getCatalog(catalogId, opts) {
   return { items: [], hasMore: false, page: page };
 }
 
-async function getAds() {
-  return [];
-}
-
-// ─── Export CommonJS (JsAddonRuntime) ─────────────────────────────────────
+async function getAds() { return []; }
 
 module.exports = {
   getHome: getHome,
