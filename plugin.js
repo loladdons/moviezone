@@ -1,4 +1,3 @@
-
 /**
  * MovieZone – Plugin completo adaptado a tu ContentService / JsAddonRuntime
  * Fuente: LaMovie (lamovie.org)
