@@ -1,0 +1,32 @@
+{
+  "id": "moviezone",
+  "name": "MovieZone",
+  "version": "1.0.0",
+  "author": "Sebasdev (adaptado)",
+  "description": "Películas, series, telenovelas, anime, colecciones y sagas en español desde LaMovie",
+  "icon": "icon.png",
+  "banner": "banner.jpg",
+  "categories": ["movies", "series", "anime"],
+  "capabilities": [
+    "home",
+    "discover",
+    "search",
+    "meta",
+    "streams",
+    "catalogs"
+  ],
+  "hosts": [
+    "lamovie.org",
+    "vimeos.net",
+    "*.vimeos.net",
+    "vimeos.zip",
+    "*.vimeos.zip",
+    "videoapp.zip",
+    "*.videoapp.zip",
+    "image.tmdb.org",
+    "raw.githubusercontent.com",
+    "kitsu.io",
+    "media.kitsu.app"
+  ],
+  "configSchema": []
+}
