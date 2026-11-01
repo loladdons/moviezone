@@ -1,4 +1,4 @@
-# MovieZone – Plugin adaptado para tu app
+# MovieZone
 
 Plugin completo portado desde el plugin original de Kino (LaMovie) a la interfaz de tu `ContentService`.
 
@@ -17,26 +17,6 @@ Plugin completo portado desde el plugin original de Kino (LaMovie) a la interfaz
 | `getCatalog(id, opts)`    | Items de un catálogo                             |
 | `getAds()`                | (vacío por ahora)                                |
 
-## Cómo instalarlo en tu app
-
-1. Copia `plugin.js` como el `jsCode` del repositorio.
-2. Usa el `manifest.json` como base del `RepoManifest`.
-3. Icono y banner incluidos (`icon.png`, `banner.jpg`).
-
-### Ejemplo de instalación (conceptual)
-
-```dart
-final repo = InstalledRepo(
-  manifest: RepoManifest.fromJson({
-    "id": "moviezone",
-    "name": "MovieZone",
-    "version": "1.0.0",
-    // ...
-  }),
-  jsCode: await rootBundle.loadString('assets/plugins/moviezone/plugin.js'),
-  userConfig: {}, // este plugin no requiere config
-);
-```
 
 ## Formato de datos devuelto
 
