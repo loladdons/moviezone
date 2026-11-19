@@ -1,6 +1,13 @@
 /**
- * MovieZone – Plugin adaptado (FIX series/capitulos + meta)
+ * MovieZone – Plugin adaptado (FIX series/capitulos + meta + colecciones/actores como catálogos)
  * Runtime: fetch global de JsAddonRuntime
+ *
+ * Cambios principales:
+ * - Home con sliders estilo sitio (hero + filas principales/secundarias)
+ * - Colecciones y actores como catálogos (type catalog) → app abre página Colecciones/Catálogos
+ * - toItem correcto para collections (images[] y posts[])
+ * - getCatalog / getCatalogs ampliado: collection-{id}, cast-{id}, géneros, etc.
+ * - getMeta de colección carga las películas/series internas
  */
 
 const BASE_API = "https://lamovie.org/wp-api/v1";
@@ -67,12 +74,46 @@ function absImg(path) {
   return UPLOADS_BASE + path;
 }
 
+/** Extrae poster/backdrop/logo de post.movies o post.collections (images objeto o array) */
+function pickImages(post) {
+  let poster = null, backdrop = null, logo = null;
+  const imgs = post && post.images;
+  if (!imgs) return { poster, backdrop, logo };
+
+  if (Array.isArray(imgs) && imgs.length) {
+    // collections: lista de sets de imágenes → usamos el primero
+    const first = imgs[0] || {};
+    poster = absImg(first.poster);
+    backdrop = absImg(first.backdrop);
+    logo = absImg(first.logo);
+    // si hay más, preferir un backdrop decente
+    for (let i = 0; i < imgs.length && !backdrop; i++) {
+      if (imgs[i] && imgs[i].backdrop) backdrop = absImg(imgs[i].backdrop);
+    }
+  } else if (typeof imgs === "object") {
+    if (imgs.poster) poster = absImg(imgs.poster);
+    if (imgs.backdrop) backdrop = absImg(imgs.backdrop);
+    if (imgs.logo) logo = absImg(imgs.logo);
+  }
+  return { poster, backdrop, logo };
+}
+
 function toItem(post) {
   if (!post || typeof post !== "object") return null;
   const postType = post.type || "movies";
-  const isSeries = postType === "tvshows" || postType === "animes" || postType === "novels" || postType === "wwe" || postType === "collections";
-  const type = isSeries ? "series" : "movie";
-  const id = postType + "-" + post._id;
+  const isCollection = postType === "collections";
+  const isSeries =
+    postType === "tvshows" ||
+    postType === "animes" ||
+    postType === "novels" ||
+    postType === "wwe" ||
+    isCollection;
+
+  // Colecciones se tratan como catálogo en la UI de la app
+  const type = isCollection ? "catalog" : (isSeries ? "series" : "movie");
+  const id = isCollection
+    ? ("collection-" + post._id)
+    : (postType + "-" + post._id);
 
   let year = null;
   if (post.release_date) {
@@ -84,12 +125,7 @@ function toItem(post) {
     if (m) year = m[1];
   }
 
-  let poster = null, backdrop = null, logo = null;
-  if (post.images && typeof post.images === "object") {
-    if (post.images.poster) poster = absImg(post.images.poster);
-    if (post.images.backdrop) backdrop = absImg(post.images.backdrop);
-    if (post.images.logo) logo = absImg(post.images.logo);
-  }
+  const { poster, backdrop, logo } = pickImages(post);
 
   let rating = null;
   if (post.rating != null) {
@@ -97,7 +133,7 @@ function toItem(post) {
     if (!isNaN(r)) rating = r;
   } else if (post.community_rating != null) {
     const r = parseFloat(post.community_rating);
-    if (!isNaN(r)) rating = r;
+    if (!isNaN(r) && r > 0) rating = r;
   }
 
   const genres = [];
@@ -108,9 +144,11 @@ function toItem(post) {
     }
   }
 
-  const title = decodeHtml(String(post.title || "Sin título").replace(/\s*\(\d{4}\)\s*$/, "").trim());
+  const title = decodeHtml(
+    String(post.title || "Sin título").replace(/\s*\(\d{4}\)\s*$/, "").trim()
+  );
 
-  return {
+  const item = {
     id: id,
     title: title,
     poster: poster,
@@ -127,8 +165,33 @@ function toItem(post) {
       ref: postType + ":" + post._id,
       postType: postType,
       originalId: post._id,
-      slug: post.slug || null
+      slug: post.slug || null,
+      postsCount: post.posts_count ? parseInt(post.posts_count, 10) : (Array.isArray(post.posts) ? post.posts.length : null),
+      postIds: Array.isArray(post.posts) ? post.posts.slice(0, 80) : null
     }
+  };
+
+  // Marca explícita de catálogo para la app (página Colecciones / Catálogos)
+  if (isCollection) {
+    item.catalogId = "collection-" + post._id;
+    item.catalogTitle = title;
+  }
+
+  return item;
+}
+
+/** Item mínimo tipo catálogo para actores / colecciones */
+function toCatalogItem(opts) {
+  return {
+    id: opts.id,
+    title: opts.title,
+    poster: opts.poster || null,
+    backdrop: opts.backdrop || null,
+    overview: opts.overview || null,
+    type: "catalog",
+    catalogId: opts.catalogId || opts.id,
+    catalogTitle: opts.title,
+    extra: opts.extra || {}
   };
 }
 
@@ -156,18 +219,27 @@ async function listing(path, page, orderBy, order, postType, perPage, filterObj)
 }
 
 async function getHome() {
+  // Filas principales (mismo espíritu del sitio: hero, populares, últimas, series, novelas, anime, colecciones)
+  // + géneros como filas secundarias
   const genreJobs = FEATURED_GENRES.map(function (g) {
     return listing("movies", 1, "ID", "desc", "movies", 14, { genres: [g.id] });
   });
 
   const results = await Promise.all([
+    // 0 Estrenos / destacados (años recientes 2025-2026)
     listing("movies", 1, "ID", "desc", "movies", 24, { years: [74006, 4] }),
+    // 1 Populares
     listing("movies", 1, "views", "desc", "movies", 18),
+    // 2 Últimas películas
     listing("movies", 1, "ID", "desc", "movies", 18),
+    // 3 Series
     listing("tvshows", 1, "ID", "desc", "tvshows", 16),
+    // 4 Novelas
     listing("novels", 1, "ID", "desc", "novels", 14),
+    // 5 Animes
     listing("animes", 1, "ID", "desc", "animes", 14),
-    listing("collections", 1, "ID", "desc", "collections", 12)
+    // 6 Colecciones (como catálogos)
+    listing("collections", 1, "ID", "desc", "collections", 16)
   ].concat(genreJobs));
 
   const rows = [];
@@ -177,17 +249,32 @@ async function getHome() {
     }
   };
 
+  // Slider principal (hero) – estilo sitio
   if (results[0].items.length) {
-    if (results[0].items[0]) results[0].items[0].backdrop = BRAND_BANNER;
+    if (results[0].items[0]) results[0].items[0].backdrop = results[0].items[0].backdrop || BRAND_BANNER;
     pushRow("estrenos", "Estrenos destacados", "hero", "backdrop", results[0].items.slice(0, 12));
   }
+
+  // Sliders secundarios / filas principales
   pushRow("populares", "Películas populares", "row", "poster", results[1].items);
   pushRow("ultimas", "Últimas películas", "row", "poster", results[2].items);
   pushRow("series", "Series", "row", "poster", results[3].items);
   pushRow("novelas", "Novelas", "row", "poster", results[4].items);
   pushRow("animes", "Anime", "row", "poster", results[5].items);
-  pushRow("colecciones", "Sagas y Colecciones", "row", "poster", results[6].items);
 
+  // Colecciones → type catalog para que la app abra página de catálogos/colecciones
+  if (results[6].items && results[6].items.length) {
+    const colItems = results[6].items.map(function (it) {
+      // asegurar type catalog
+      it.type = "catalog";
+      it.catalogId = it.catalogId || it.id;
+      it.catalogTitle = it.title;
+      return it;
+    });
+    pushRow("colecciones", "Sagas y Colecciones", "row", "poster", colItems);
+  }
+
+  // Filas de géneros (secundarias)
   for (let i = 0; i < FEATURED_GENRES.length; i++) {
     const g = FEATURED_GENRES[i];
     const res = results[7 + i];
@@ -195,6 +282,7 @@ async function getHome() {
       pushRow("cat-" + g.slug, g.name, "row", "poster", res.items);
     }
   }
+
   return rows;
 }
 
@@ -244,12 +332,10 @@ async function getDiscover(opts) {
   opts = opts || {};
   const page = parseInt(opts.page, 10) || 1;
 
-  // La UI envía { type, genre, order } desde _filterMap
   let type = opts.type || opts.filter || opts.filterId || "movies";
   let genreRaw = opts.genre;
   let orderRaw = opts.order;
 
-  // Compat: a veces el valor viene en español
   const typeMap = {
     "peliculas": "movies", "películas": "movies", "movie": "movies", "movies": "movies",
     "series": "tvshows", "serie": "tvshows", "tv": "tvshows", "tvshows": "tvshows",
@@ -268,7 +354,6 @@ async function getDiscover(opts) {
   else if (type === "collections") { path = "collections"; postType = "collections"; }
   else { path = "movies"; postType = "movies"; type = "movies"; }
 
-  // Género SOLO aplica a películas (los term_id de LaMovie son de movies)
   let filterObj = null;
   if (postType === "movies" && genreRaw != null && genreRaw !== "" && genreRaw !== "all") {
     const genreId = parseInt(genreRaw, 10);
@@ -304,6 +389,9 @@ function parseId(id) {
   }
   if (s.indexOf("kitsu-") === 0) return { postType: "kitsu", originalId: s.slice(6) };
   if (s.indexOf("episode-") === 0) return { postType: "episodes", originalId: s.slice(8) };
+  if (s.indexOf("collection-") === 0) return { postType: "collections", originalId: s.slice(11), isCatalog: true };
+  if (s.indexOf("cast-") === 0) return { postType: "cast", originalId: s.slice(5), isCatalog: true };
+  if (s.indexOf("actor-") === 0) return { postType: "cast", originalId: s.slice(6), isCatalog: true };
   const idx = s.indexOf("-");
   if (idx > 0) return { postType: s.slice(0, idx), originalId: s.slice(idx + 1) };
   return { postType: "movies", originalId: s };
@@ -319,7 +407,6 @@ async function fetchPostById(postType, originalId) {
   const path = pathMap[postType] || "movies";
   const perPage = 50;
 
-  // 1) Búsqueda textual por si el runtime ya tiene título en cache no aplica; intentar igual
   let data = await apiGet(
     BASE_API + "/search?q=" + encodeURIComponent(originalId) +
     "&postType=" + postType + "&postsPerPage=10"
@@ -330,7 +417,6 @@ async function fetchPostById(postType, originalId) {
     }
   }
 
-  // 2) Últimos publicados (desc) — cubre estrenos recientes
   for (let page = 1; page <= 3; page++) {
     const list = await apiGet(
       BASE_API + "/listing/" + path + "?page=" + page +
@@ -342,7 +428,6 @@ async function fetchPostById(postType, originalId) {
     }
   }
 
-  // 3) Búsqueda binaria por páginas con orderBy=ID asc
   let first = await apiGet(
     BASE_API + "/listing/" + path + "?page=1&orderBy=ID&order=asc&postType=" +
     postType + "&postsPerPage=" + perPage
@@ -354,7 +439,6 @@ async function fetchPostById(postType, originalId) {
   let hi = pag.last_page || 1;
   const want = parseInt(target, 10);
 
-  // Si está en página 1 asc
   for (let i = 0; i < first.data.posts.length; i++) {
     if (String(first.data.posts[i]._id) === target) return first.data.posts[i];
   }
@@ -383,8 +467,6 @@ async function fetchPostById(postType, originalId) {
       if (want < firstId) hi = mid - 1;
       else if (want > lastId) lo = mid + 1;
       else {
-        // id dentro del rango de la página pero no encontrado (huecos)
-        // explorar vecinos
         if (mid > 1) {
           const left = await apiGet(
             BASE_API + "/listing/" + path + "?page=" + (mid - 1) +
@@ -418,11 +500,9 @@ async function fetchPostById(postType, originalId) {
 
 /**
  * Carga TODAS las temporadas y episodios.
- * Endpoint correcto (del plugin original Kino):
- *   /single/episodes/list?_id=SERIES_ID&season=N&page=1&postsPerPage=100
+ * Endpoint: /single/episodes/list?_id=SERIES_ID&season=N&page=1&postsPerPage=100
  */
 async function loadSeasonsAndEpisodes(seriesId) {
-  // Primera llamada para obtener lista de temporadas
   const first = await apiGet(
     BASE_API + "/single/episodes/list?_id=" + encodeURIComponent(seriesId) +
     "&season=1&page=1&postsPerPage=100"
@@ -487,7 +567,6 @@ async function loadSeasonsAndEpisodes(seriesId) {
 
 function titleFromEpisode(epTitle) {
   if (!epTitle) return null;
-  // "Grey's Anatomy: Temporada 1 Episodio 1" -> "Grey's Anatomy"
   const t = decodeHtml(String(epTitle));
   const m = t.match(/^(.*?)\s*[:\-–]\s*Temporada\s*\d+/i);
   if (m) return m[1].trim();
@@ -496,14 +575,104 @@ function titleFromEpisode(epTitle) {
   return null;
 }
 
+/** Resuelve lista de IDs de posts de una colección a items (limitado y en paralelo por lotes). */
+async function resolveCollectionPosts(postIds, limit) {
+  const ids = (postIds || []).slice(0, limit || 40);
+  if (!ids.length) return [];
+
+  const items = [];
+  const batchSize = 6;
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    const results = await Promise.all(batch.map(function (pid) {
+      return fetchPostById("movies", String(pid)).then(function (p) {
+        if (p) return toItem(p);
+        // fallback series
+        return fetchPostById("tvshows", String(pid)).then(function (p2) {
+          return p2 ? toItem(p2) : null;
+        });
+      });
+    }));
+    for (let j = 0; j < results.length; j++) {
+      if (results[j]) items.push(results[j]);
+    }
+  }
+  return items;
+}
+
 async function getMeta(id, opts) {
   opts = opts || {};
   if (!id) return null;
 
   const parsed = parseId(id);
-  const seriesTypes = { tvshows: 1, animes: 1, novels: 1, wwe: 1, collections: 1 };
+  const seriesTypes = { tvshows: 1, animes: 1, novels: 1, wwe: 1 };
 
-  // ── SERIES: prioridad cargar capítulos ──
+  // ── COLECCIÓN (catálogo) ──
+  if (parsed.postType === "collections") {
+    const post = await fetchPostById("collections", parsed.originalId);
+    let title = "Colección";
+    let overview = null;
+    let poster = null;
+    let backdrop = null;
+    let postIds = [];
+
+    if (post) {
+      const item = toItem(post);
+      title = (item && item.title) || title;
+      overview = (item && item.overview) || null;
+      poster = (item && item.poster) || null;
+      backdrop = (item && item.backdrop) || null;
+      postIds = (item && item.extra && item.extra.postIds) || (Array.isArray(post.posts) ? post.posts : []);
+    }
+
+    // Cargar contenido interno para la página de catálogo
+    const catalogItems = await resolveCollectionPosts(postIds, 36);
+
+    return {
+      id: id,
+      title: title,
+      poster: poster,
+      backdrop: backdrop,
+      overview: overview,
+      type: "catalog",
+      catalogId: "collection-" + parsed.originalId,
+      catalogTitle: title,
+      // items del catálogo (la app los muestra en la página Colecciones/Catálogos)
+      items: catalogItems,
+      related: catalogItems,
+      extra: {
+        ref: "collections:" + parsed.originalId,
+        postType: "collections",
+        originalId: parsed.originalId,
+        postIds: postIds
+      }
+    };
+  }
+
+  // ── ACTOR / CAST (catálogo) ──
+  if (parsed.postType === "cast") {
+    const castId = parseInt(parsed.originalId, 10);
+    const filter = !isNaN(castId) ? { cast: [castId] } : null;
+    const res = await listing("movies", 1, "ID", "desc", "movies", 36, filter);
+    const title = opts.title || ("Actor " + parsed.originalId);
+
+    return {
+      id: id,
+      title: title,
+      type: "catalog",
+      catalogId: "cast-" + parsed.originalId,
+      catalogTitle: title,
+      items: res.items,
+      related: res.items,
+      extra: {
+        ref: "cast:" + parsed.originalId,
+        postType: "cast",
+        originalId: parsed.originalId
+      }
+    };
+  }
+
+  // ── SERIES ──
   if (seriesTypes[parsed.postType]) {
     const seasons = await loadSeasonsAndEpisodes(parsed.originalId);
     const post = await fetchPostById(parsed.postType, parsed.originalId);
@@ -517,7 +686,6 @@ async function getMeta(id, opts) {
       }
     }
 
-    // Sin post completo: armar meta mínima CON capítulos (clave para la UI)
     let title = "Serie";
     let overview = null;
     let still = null;
@@ -548,8 +716,6 @@ async function getMeta(id, opts) {
   if (parsed.postType === "movies" || parsed.postType === "movie") {
     const post = await fetchPostById("movies", parsed.originalId);
     if (post) return toItem(post);
-    // Nunca devolver null: la UI muestra "No encontrado".
-    // Streams siguen funcionando con el originalId vía /player?postId=
     return {
       id: id,
       title: "Película",
@@ -620,7 +786,6 @@ async function getMeta(id, opts) {
     };
   }
 
-  // Fallback: objeto mínimo (evita "No encontrado" en la UI)
   return {
     id: id,
     title: parsed.postType === "movies" ? "Película" : "Contenido",
@@ -736,7 +901,6 @@ async function getStreams(id, type, season, episode) {
   const parsed = parseId(id);
   let postId = parsed.originalId;
 
-  // Serie + season/episode → resolver id del episodio real
   const isSeries = parsed.postType === "tvshows" || parsed.postType === "animes" ||
     parsed.postType === "novels" || type === "series" || type === "tv";
 
@@ -755,7 +919,6 @@ async function getStreams(id, type, season, episode) {
           break;
         }
       }
-      // paginar si no está en página 1
       if (!found && data.data.pagination && data.data.pagination.last_page > 1) {
         for (let p = 2; p <= Math.min(data.data.pagination.last_page, 10) && !found; p++) {
           const d2 = await apiGet(
@@ -780,38 +943,88 @@ async function getStreams(id, type, season, episode) {
     postId = parsed.originalId;
   }
 
+  // colecciones / cast no tienen streams propios
+  if (parsed.postType === "collections" || parsed.postType === "cast") return [];
+
   const embeds = await getPlayerEmbeds(postId);
   if (!embeds.length) return [];
   return await resolveEmbeds(embeds);
 }
 
 async function getCatalogs() {
-  return [
+  // Catálogos fijos + géneros + entrada a colecciones
+  const base = [
     { id: "movies-latest", title: "Últimas películas", type: "movies" },
     { id: "movies-popular", title: "Películas populares", type: "movies" },
     { id: "series-latest", title: "Series recientes", type: "series" },
     { id: "animes-latest", title: "Anime reciente", type: "anime" },
     { id: "novels-latest", title: "Novelas", type: "series" },
-    { id: "collections", title: "Sagas y Colecciones", type: "series" }
+    { id: "collections", title: "Sagas y Colecciones", type: "catalog" }
   ].concat(FEATURED_GENRES.map(function (g) {
     return { id: "genre-" + g.id, title: g.name, type: "movies" };
   }));
+
+  // Añadir colecciones recientes como catálogos individuales (para la página Colecciones)
+  try {
+    const colRes = await listing("collections", 1, "ID", "desc", "collections", 24);
+    for (let i = 0; i < colRes.items.length; i++) {
+      const c = colRes.items[i];
+      base.push({
+        id: c.catalogId || c.id,
+        title: c.title,
+        type: "catalog",
+        poster: c.poster || null
+      });
+    }
+  } catch (e) {}
+
+  return base;
 }
 
 async function getCatalog(catalogId, opts) {
   opts = opts || {};
   const page = parseInt(opts.page, 10) || 1;
   const id = String(catalogId || "");
+
   if (id === "movies-latest") return listing("movies", page, "ID", "desc", "movies", 24);
   if (id === "movies-popular") return listing("movies", page, "views", "desc", "movies", 24);
   if (id === "series-latest") return listing("tvshows", page, "ID", "desc", "tvshows", 24);
   if (id === "animes-latest") return listing("animes", page, "ID", "desc", "animes", 24);
   if (id === "novels-latest") return listing("novels", page, "ID", "desc", "novels", 24);
   if (id === "collections") return listing("collections", page, "ID", "desc", "collections", 24);
+
   if (id.indexOf("genre-") === 0) {
     const gId = parseInt(id.replace("genre-", ""), 10);
     return listing("movies", page, "ID", "desc", "movies", 24, { genres: [gId] });
   }
+
+  // Colección individual → lista de títulos internos
+  if (id.indexOf("collection-") === 0) {
+    const colId = id.slice(11);
+    const post = await fetchPostById("collections", colId);
+    const postIds = (post && Array.isArray(post.posts)) ? post.posts : [];
+    // Paginación simple sobre los IDs
+    const perPage = 24;
+    const start = (page - 1) * perPage;
+    const slice = postIds.slice(start, start + perPage);
+    const items = await resolveCollectionPosts(slice, perPage);
+    return {
+      items: items,
+      hasMore: start + perPage < postIds.length,
+      page: page,
+      title: post ? decodeHtml(post.title) : "Colección"
+    };
+  }
+
+  // Actor / elenco → películas filtradas por cast
+  if (id.indexOf("cast-") === 0 || id.indexOf("actor-") === 0) {
+    const castId = id.replace(/^(cast|actor)-/, "");
+    const cid = parseInt(castId, 10);
+    if (!isNaN(cid)) {
+      return listing("movies", page, "ID", "desc", "movies", 24, { cast: [cid] });
+    }
+  }
+
   return { items: [], hasMore: false, page: page };
 }
 
