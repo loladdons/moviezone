@@ -106,11 +106,11 @@ function toItem(post) {
     postType === "tvshows" ||
     postType === "animes" ||
     postType === "novels" ||
-    postType === "wwe" ||
-    isCollection;
+    postType === "wwe";
 
-  // Colecciones se tratan como catálogo en la UI de la app
-  const type = isCollection ? "catalog" : (isSeries ? "series" : "movie");
+  // Colecciones → type "movie" para abrir ficha de contenido (como el home).
+  // El id collection-... permite getMeta/getCatalog resolver el listado interno.
+  const type = isCollection ? "movie" : (isSeries ? "series" : "movie");
   const id = isCollection
     ? ("collection-" + post._id)
     : (postType + "-" + post._id);
@@ -171,10 +171,11 @@ function toItem(post) {
     }
   };
 
-  // Marca explícita de catálogo para la app (página Colecciones / Catálogos)
   if (isCollection) {
     item.catalogId = "collection-" + post._id;
     item.catalogTitle = title;
+    // La app puede usar esto para listar el contenido de la colección
+    item.genres = item.genres && item.genres.length ? item.genres : ["Colección"];
   }
 
   return item;
@@ -262,11 +263,11 @@ async function getHome() {
   pushRow("novelas", "Novelas", "row", "poster", results[4].items);
   pushRow("animes", "Anime", "row", "poster", results[5].items);
 
-  // Colecciones → type catalog para que la app abra página de catálogos/colecciones
+  // Colecciones → mismos ítems que el home (type movie + id collection-...)
+  // Al tocar se abre ficha de contenido con related (títulos de la saga)
   if (results[6].items && results[6].items.length) {
     const colItems = results[6].items.map(function (it) {
-      // asegurar type catalog
-      it.type = "catalog";
+      it.type = "movie";
       it.catalogId = it.catalogId || it.id;
       it.catalogTitle = it.title;
       return it;
@@ -575,26 +576,92 @@ function titleFromEpisode(epTitle) {
   return null;
 }
 
-/** Resuelve lista de IDs de posts de una colección a items (limitado y en paralelo por lotes). */
+/** Caché en memoria de posts por _id (evita búsquedas binarias lentas al abrir colecciones). */
+const _postCache = Object.create(null);
+let _cacheWarmPromise = null;
+
+function _cachePutPosts(posts) {
+  if (!Array.isArray(posts)) return;
+  for (let i = 0; i < posts.length; i++) {
+    const p = posts[i];
+    if (p && p._id != null) _postCache[String(p._id)] = p;
+  }
+}
+
+/** Precalienta caché con páginas recientes de movies/tvshows (1 sola vez por sesión). */
+function warmPostCache() {
+  if (_cacheWarmPromise) return _cacheWarmPromise;
+  _cacheWarmPromise = (async function () {
+    try {
+      const jobs = [];
+      for (let page = 1; page <= 6; page++) {
+        jobs.push(apiGet(
+          BASE_API + "/listing/movies?page=" + page +
+          "&orderBy=ID&order=desc&postType=movies&postsPerPage=50"
+        ));
+      }
+      for (let page = 1; page <= 3; page++) {
+        jobs.push(apiGet(
+          BASE_API + "/listing/tvshows?page=" + page +
+          "&orderBy=ID&order=desc&postType=tvshows&postsPerPage=50"
+        ));
+      }
+      const results = await Promise.all(jobs);
+      for (let i = 0; i < results.length; i++) {
+        const d = results[i];
+        if (d && d.data && Array.isArray(d.data.posts)) _cachePutPosts(d.data.posts);
+      }
+    } catch (e) {}
+  })();
+  return _cacheWarmPromise;
+}
+
+/**
+ * Resuelve IDs de una colección de forma RÁPIDA:
+ * 1) caché precalentada (páginas recientes)
+ * 2) como máximo 6 búsquedas individuales para los que falten
+ * Nunca bloquea con 30+ binary searches.
+ */
 async function resolveCollectionPosts(postIds, limit) {
-  const ids = (postIds || []).slice(0, limit || 40);
+  const ids = (postIds || []).map(String).slice(0, limit || 24);
   if (!ids.length) return [];
 
-  const items = [];
-  const batchSize = 6;
-  for (let i = 0; i < ids.length; i += batchSize) {
-    const batch = ids.slice(i, i + batchSize);
-    const results = await Promise.all(batch.map(function (pid) {
-      return fetchPostById("movies", String(pid)).then(function (p) {
-        if (p) return toItem(p);
-        // fallback series
-        return fetchPostById("tvshows", String(pid)).then(function (p2) {
-          return p2 ? toItem(p2) : null;
-        });
-      });
+  await warmPostCache();
+
+  const ordered = [];
+  const missing = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    if (_postCache[id]) ordered.push({ id: id, post: _postCache[id] });
+    else {
+      ordered.push({ id: id, post: null });
+      missing.push(id);
+    }
+  }
+
+  // Solo resolver unos pocos faltantes (evita spinner infinito)
+  const toFetch = missing.slice(0, 6);
+  if (toFetch.length) {
+    const fetched = await Promise.all(toFetch.map(async function (pid) {
+      let p = await fetchPostById("movies", pid);
+      if (!p) p = await fetchPostById("tvshows", pid);
+      if (p) _postCache[pid] = p;
+      return { id: pid, post: p };
     }));
-    for (let j = 0; j < results.length; j++) {
-      if (results[j]) items.push(results[j]);
+    const map = Object.create(null);
+    for (let i = 0; i < fetched.length; i++) {
+      if (fetched[i].post) map[fetched[i].id] = fetched[i].post;
+    }
+    for (let i = 0; i < ordered.length; i++) {
+      if (!ordered[i].post && map[ordered[i].id]) ordered[i].post = map[ordered[i].id];
+    }
+  }
+
+  const items = [];
+  for (let i = 0; i < ordered.length; i++) {
+    if (ordered[i].post) {
+      const it = toItem(ordered[i].post);
+      if (it) items.push(it);
     }
   }
   return items;
@@ -607,9 +674,27 @@ async function getMeta(id, opts) {
   const parsed = parseId(id);
   const seriesTypes = { tvshows: 1, animes: 1, novels: 1, wwe: 1 };
 
-  // ── COLECCIÓN (catálogo) ──
+  // ── COLECCIÓN → ficha de contenido (como el home), sin spinner eterno ──
   if (parsed.postType === "collections") {
-    const post = await fetchPostById("collections", parsed.originalId);
+    // 1) Buscar la colección (suele estar en páginas recientes)
+    let post = null;
+    // Intento rápido: últimas páginas desc
+    for (let page = 1; page <= 4 && !post; page++) {
+      const list = await apiGet(
+        BASE_API + "/listing/collections?page=" + page +
+        "&orderBy=ID&order=desc&postType=collections&postsPerPage=50"
+      );
+      if (!list || !list.data || !Array.isArray(list.data.posts)) break;
+      _cachePutPosts(list.data.posts);
+      for (let i = 0; i < list.data.posts.length; i++) {
+        if (String(list.data.posts[i]._id) === String(parsed.originalId)) {
+          post = list.data.posts[i];
+          break;
+        }
+      }
+    }
+    if (!post) post = await fetchPostById("collections", parsed.originalId);
+
     let title = "Colección";
     let overview = null;
     let poster = null;
@@ -618,33 +703,48 @@ async function getMeta(id, opts) {
 
     if (post) {
       const item = toItem(post);
-      title = (item && item.title) || title;
-      overview = (item && item.overview) || null;
+      title = (item && item.title) || decodeHtml(post.title) || title;
+      overview = (item && item.overview) || (post.overview ? decodeHtml(post.overview) : null);
       poster = (item && item.poster) || null;
       backdrop = (item && item.backdrop) || null;
-      postIds = (item && item.extra && item.extra.postIds) || (Array.isArray(post.posts) ? post.posts : []);
+      postIds = Array.isArray(post.posts) ? post.posts : [];
+      if (item && item.extra && item.extra.postIds) postIds = item.extra.postIds;
     }
 
-    // Cargar contenido interno para la página de catálogo
-    const catalogItems = await resolveCollectionPosts(postIds, 36);
+    // 2) Resolver SOLO una página pequeña de títulos internos (rápido vía caché)
+    //    Si tarda, devolvemos la ficha igual con related vacío.
+    let related = [];
+    try {
+      related = await resolveCollectionPosts(postIds, 18);
+    } catch (e) {
+      related = [];
+    }
 
+    const count = postIds.length || related.length;
+    if (!overview && count) {
+      overview = count + " títulos en esta colección";
+    }
+
+    // type "movie" → la app abre la ficha de contenido igual que en el home
+    // catalogId sigue disponible por si la UI de catálogos lo usa
     return {
       id: id,
       title: title,
       poster: poster,
-      backdrop: backdrop,
+      backdrop: backdrop || poster,
       overview: overview,
-      type: "catalog",
+      type: "movie",
       catalogId: "collection-" + parsed.originalId,
       catalogTitle: title,
-      // items del catálogo (la app los muestra en la página Colecciones/Catálogos)
-      items: catalogItems,
-      related: catalogItems,
+      related: related,
+      items: related,
+      genres: ["Colección"],
       extra: {
         ref: "collections:" + parsed.originalId,
         postType: "collections",
         originalId: parsed.originalId,
-        postIds: postIds
+        postIds: postIds,
+        postsCount: count
       }
     };
   }
@@ -998,13 +1098,30 @@ async function getCatalog(catalogId, opts) {
     return listing("movies", page, "ID", "desc", "movies", 24, { genres: [gId] });
   }
 
-  // Colección individual → lista de títulos internos
+  // Colección individual → lista de títulos internos (rápido con caché)
   if (id.indexOf("collection-") === 0) {
     const colId = id.slice(11);
-    const post = await fetchPostById("collections", colId);
+    let post = _postCache["col:" + colId] || null;
+    if (!post) {
+      for (let p = 1; p <= 3 && !post; p++) {
+        const list = await apiGet(
+          BASE_API + "/listing/collections?page=" + p +
+          "&orderBy=ID&order=desc&postType=collections&postsPerPage=50"
+        );
+        if (!list || !list.data || !Array.isArray(list.data.posts)) break;
+        _cachePutPosts(list.data.posts);
+        for (let i = 0; i < list.data.posts.length; i++) {
+          if (String(list.data.posts[i]._id) === String(colId)) {
+            post = list.data.posts[i];
+            break;
+          }
+        }
+      }
+      if (!post) post = await fetchPostById("collections", colId);
+      if (post) _postCache["col:" + colId] = post;
+    }
     const postIds = (post && Array.isArray(post.posts)) ? post.posts : [];
-    // Paginación simple sobre los IDs
-    const perPage = 24;
+    const perPage = 18;
     const start = (page - 1) * perPage;
     const slice = postIds.slice(start, start + perPage);
     const items = await resolveCollectionPosts(slice, perPage);
