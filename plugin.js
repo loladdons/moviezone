@@ -108,9 +108,9 @@ function toItem(post) {
     postType === "novels" ||
     postType === "wwe";
 
-  // Colecciones → type "movie" para abrir ficha de contenido (como el home).
-  // El id collection-... permite getMeta/getCatalog resolver el listado interno.
-  const type = isCollection ? "movie" : (isSeries ? "series" : "movie");
+  // Colecciones → type "catalog": al tocar se abre la PÁGINA Colecciones de la app.
+  // Dentro, cada título (movie/series) abre la ficha de contenido.
+  const type = isCollection ? "catalog" : (isSeries ? "series" : "movie");
   const id = isCollection
     ? ("collection-" + post._id)
     : (postType + "-" + post._id);
@@ -174,7 +174,7 @@ function toItem(post) {
   if (isCollection) {
     item.catalogId = "collection-" + post._id;
     item.catalogTitle = title;
-    // La app puede usar esto para listar el contenido de la colección
+    item.isCatalog = true;
     item.genres = item.genres && item.genres.length ? item.genres : ["Colección"];
   }
 
@@ -263,11 +263,11 @@ async function getHome() {
   pushRow("novelas", "Novelas", "row", "poster", results[4].items);
   pushRow("animes", "Anime", "row", "poster", results[5].items);
 
-  // Colecciones → mismos ítems que el home (type movie + id collection-...)
-  // Al tocar se abre ficha de contenido con related (títulos de la saga)
+  // Slider "Sagas y Colecciones": cada ítem es catalog → abre página Colecciones de la app
   if (results[6].items && results[6].items.length) {
     const colItems = results[6].items.map(function (it) {
-      it.type = "movie";
+      it.type = "catalog";
+      it.isCatalog = true;
       it.catalogId = it.catalogId || it.id;
       it.catalogTitle = it.title;
       return it;
@@ -639,8 +639,8 @@ async function resolveCollectionPosts(postIds, limit) {
     }
   }
 
-  // Solo resolver unos pocos faltantes (evita spinner infinito)
-  const toFetch = missing.slice(0, 6);
+  // Resolver faltantes en paralelo (tope razonable para no colgar la UI)
+  const toFetch = missing.slice(0, 12);
   if (toFetch.length) {
     const fetched = await Promise.all(toFetch.map(async function (pid) {
       let p = await fetchPostById("movies", pid);
@@ -674,11 +674,11 @@ async function getMeta(id, opts) {
   const parsed = parseId(id);
   const seriesTypes = { tvshows: 1, animes: 1, novels: 1, wwe: 1 };
 
-  // ── COLECCIÓN → ficha de contenido (como el home), sin spinner eterno ──
+  // ── COLECCIÓN → catálogo (página Colecciones de la app) ──
+  // Flujo: Home → click colección → página Colecciones con el listado
+  //        → click título → ficha de contenido
   if (parsed.postType === "collections") {
-    // 1) Buscar la colección (suele estar en páginas recientes)
     let post = null;
-    // Intento rápido: últimas páginas desc
     for (let page = 1; page <= 4 && !post; page++) {
       const list = await apiGet(
         BASE_API + "/listing/collections?page=" + page +
@@ -711,33 +711,32 @@ async function getMeta(id, opts) {
       if (item && item.extra && item.extra.postIds) postIds = item.extra.postIds;
     }
 
-    // 2) Resolver SOLO una página pequeña de títulos internos (rápido vía caché)
-    //    Si tarda, devolvemos la ficha igual con related vacío.
-    let related = [];
+    // Títulos internos (type movie/series) → al tocarlos sí abren ficha
+    let catalogItems = [];
     try {
-      related = await resolveCollectionPosts(postIds, 18);
+      catalogItems = await resolveCollectionPosts(postIds, 24);
     } catch (e) {
-      related = [];
+      catalogItems = [];
     }
 
-    const count = postIds.length || related.length;
+    const count = postIds.length || catalogItems.length;
     if (!overview && count) {
       overview = count + " títulos en esta colección";
     }
 
-    // type "movie" → la app abre la ficha de contenido igual que en el home
-    // catalogId sigue disponible por si la UI de catálogos lo usa
     return {
       id: id,
       title: title,
       poster: poster,
       backdrop: backdrop || poster,
       overview: overview,
-      type: "movie",
+      type: "catalog",
+      isCatalog: true,
       catalogId: "collection-" + parsed.originalId,
       catalogTitle: title,
-      related: related,
-      items: related,
+      // Listado que muestra la página Colecciones de la app
+      items: catalogItems,
+      related: catalogItems,
       genres: ["Colección"],
       extra: {
         ref: "collections:" + parsed.originalId,
